@@ -14,15 +14,32 @@
     </header>
 
     <div class="filters">
-      <input type="date" id="startDate" />
-      <input type="date" id="endDate" />
-      <button>Get Space Images</button>
+      <input type="date" id="startDate" aria-label="Start date" />
+      <input type="date" id="endDate" aria-label="End date" />
+      <button id="getImagesButton" type="button">Get Space Images</button>
     </div>
+
+    <section class="space-fact" aria-labelledby="factTitle">
+      <h2 id="factTitle">🚀 Did You Know?</h2>
+      <p id="spaceFact"></p>
+    </section>
 
     <div id="gallery" class="gallery">
       <div class="placeholder">
         <div class="placeholder-icon">🔭</div>
         <p>Select a date range and click "Get Space Images" to explore the cosmos!</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="imageModal" class="modal" aria-hidden="true">
+    <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <button id="closeModalButton" class="modal-close" type="button" aria-label="Close image details">&times;</button>
+      <div id="modalMedia" class="modal-media"></div>
+      <div class="modal-details">
+        <p id="modalDate" class="modal-date"></p>
+        <h2 id="modalTitle"></h2>
+        <p id="modalExplanation"></p>
       </div>
     </div>
   </div>
