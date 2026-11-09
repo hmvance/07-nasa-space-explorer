@@ -10,6 +10,8 @@ const modalDate = document.getElementById('modalDate');
 const modalTitle = document.getElementById('modalTitle');
 const modalExplanation = document.getElementById('modalExplanation');
 const closeModalButton = document.getElementById('closeModalButton');
+const apodApiUrl = 'https://science.nasa.gov/wp-json/wp/v2/apod-basic';
+const apodPageSize = 25;
 
 const spaceFacts = [
 	'A day on Venus is longer than its year.',
@@ -64,21 +66,32 @@ async function getSpaceImages() {
 	activeRequest = request;
 	showGalleryMessage('🔄 Loading space photos...');
 
-	const apiUrl = new URL('https://api.nasa.gov/planetary/apod');
-	apiUrl.searchParams.set('api_key', 'DEMO_KEY');
-	apiUrl.searchParams.set('start_date', startDate);
-	apiUrl.searchParams.set('end_date', endDate);
+	const apiUrl = new URL(apodApiUrl);
+	apiUrl.searchParams.set('date_from', startDate);
+	apiUrl.searchParams.set('date_to', endDate);
+	apiUrl.searchParams.set('per_page', apodPageSize);
 
 	try {
 		const response = await fetch(apiUrl, { signal: request.signal });
+		const responseData = await response.json();
+		let spacePhotos;
 
-		if (!response.ok) {
+		if (response.ok && Array.isArray(responseData)) {
+			const totalPages = Number(response.headers.get('X-WP-TotalPages')) || 1;
+			const allResultsMatchRange = responseData.every((photo) => photo.date >= startDate && photo.date <= endDate);
+
+			if (totalPages === 1 && allResultsMatchRange) {
+				spacePhotos = responseData;
+			} else {
+				spacePhotos = await fetchApodDateRangeByPages(startDate, endDate, request.signal);
+			}
+		} else if (isDateFilterError(response.status, responseData)) {
+			spacePhotos = await fetchApodDateRangeByPages(startDate, endDate, request.signal);
+		} else {
 			throw new Error('NASA could not load those photos. Please try again later.');
 		}
 
-		const spacePhotos = await response.json();
-
-		if (!Array.isArray(spacePhotos) || spacePhotos.length === 0) {
+		if (spacePhotos.length === 0) {
 			showGalleryMessage('No space photos were found for that date range. Try different dates.');
 			return;
 		}
@@ -86,13 +99,96 @@ async function getSpaceImages() {
 		displaySpacePhotos(spacePhotos);
 	} catch (error) {
 		if (!request.signal.aborted && error.name !== 'AbortError') {
-			showGalleryMessage(error.message || 'Something went wrong while loading the photos. Please try again.');
+			showGalleryMessage('NASA could not load those photos. Check your connection and try again later.');
 		}
 	} finally {
 		if (activeRequest === request) {
 			activeRequest = null;
 		}
 	}
+}
+
+function isDateFilterError(status, responseData) {
+	return status === 400 &&
+		responseData?.code === 'rest_invalid_param' &&
+		(responseData.data?.params?.date_from || responseData.data?.params?.date_to);
+}
+
+async function fetchApodDateRangeByPages(startDate, endDate, signal) {
+	const cachedPages = new Map();
+
+	async function loadPage(pageNumber) {
+		if (cachedPages.has(pageNumber)) {
+			return cachedPages.get(pageNumber);
+		}
+
+		const pageUrl = new URL(apodApiUrl);
+		pageUrl.searchParams.set('page', pageNumber);
+		pageUrl.searchParams.set('per_page', apodPageSize);
+
+		const response = await fetch(pageUrl, { signal });
+		const pagePhotos = await response.json();
+
+		if (!response.ok || !Array.isArray(pagePhotos)) {
+			throw new Error('NASA could not load those photos. Please try again later.');
+		}
+
+		const page = {
+			photos: pagePhotos,
+			totalPages: Number(response.headers.get('X-WP-TotalPages')) || pageNumber
+		};
+		cachedPages.set(pageNumber, page);
+		return page;
+	}
+
+	const firstPage = await loadPage(1);
+	if (firstPage.photos.length === 0) {
+		return [];
+	}
+
+	let startPage = 1;
+	const totalPages = firstPage.totalPages;
+	const oldestFirstPageDate = firstPage.photos[firstPage.photos.length - 1].date;
+
+	if (endDate < oldestFirstPageDate && totalPages > 1) {
+		let firstPageToCheck = 1;
+		let lastPageToCheck = totalPages;
+
+		while (firstPageToCheck < lastPageToCheck) {
+			const middlePage = Math.floor((firstPageToCheck + lastPageToCheck) / 2);
+			const page = await loadPage(middlePage);
+			const newestDateOnPage = page.photos[0]?.date;
+
+			if (!newestDateOnPage || newestDateOnPage > endDate) {
+				firstPageToCheck = middlePage + 1;
+			} else {
+				lastPageToCheck = middlePage;
+			}
+		}
+
+		startPage = Math.max(1, firstPageToCheck - 1);
+	}
+
+	const matchingPhotos = [];
+	for (let pageNumber = startPage; pageNumber <= totalPages; pageNumber += 1) {
+		const page = await loadPage(pageNumber);
+		if (page.photos.length === 0) {
+			break;
+		}
+
+		page.photos.forEach((photo) => {
+			if (photo.date >= startDate && photo.date <= endDate) {
+				matchingPhotos.push(photo);
+			}
+		});
+
+		const oldestDateOnPage = page.photos[page.photos.length - 1].date;
+		if (oldestDateOnPage < startDate) {
+			break;
+		}
+	}
+
+	return matchingPhotos;
 }
 
 function displaySpacePhotos(spacePhotos) {
@@ -120,20 +216,38 @@ function createImageCard(photo) {
 	imageButton.type = 'button';
 	imageButton.setAttribute('aria-label', `View ${photo.title}`);
 
-	const image = document.createElement('img');
-	image.src = photo.hdurl || photo.url;
-	image.alt = photo.title;
-	image.loading = 'lazy';
-	image.addEventListener('error', () => {
-		image.hidden = true;
+	const imageUrl = getApodImageUrl(photo);
+	if (imageUrl) {
+		const image = document.createElement('img');
+		image.src = imageUrl;
+		image.alt = photo.title;
+		image.loading = 'lazy';
+		image.addEventListener('error', () => {
+			image.hidden = true;
+			imageButton.classList.add('image-unavailable');
+		}, { once: true });
+		imageButton.append(image);
+	} else {
 		imageButton.classList.add('image-unavailable');
-	}, { once: true });
-	imageButton.append(image);
+		imageButton.disabled = true;
+	}
 	imageButton.addEventListener('click', () => openImageModal(photo, imageButton));
 
 	const details = createCardDetails(photo);
 	card.append(imageButton, details);
 	gallery.append(card);
+}
+
+function getApodImageUrl(photo) {
+	if (typeof photo.hdurl === 'string' && photo.hdurl.startsWith('https://')) {
+		return photo.hdurl;
+	}
+
+	if (typeof photo.url === 'string' && /\.(avif|gif|jpe?g|png|webp)(?:[?#]|$)/i.test(photo.url)) {
+		return photo.url;
+	}
+
+	return '';
 }
 
 function createVideoCard(photo) {
@@ -143,7 +257,21 @@ function createVideoCard(photo) {
 	const videoPreview = document.createElement('div');
 	videoPreview.className = 'video-preview';
 	videoPreview.setAttribute('aria-hidden', 'true');
-	videoPreview.textContent = '▶';
+
+	const imageUrl = getApodImageUrl(photo);
+	if (imageUrl) {
+		const previewImage = document.createElement('img');
+		previewImage.src = imageUrl;
+		previewImage.alt = '';
+		previewImage.loading = 'lazy';
+		previewImage.addEventListener('error', () => previewImage.remove(), { once: true });
+		videoPreview.append(previewImage);
+	}
+
+	const playIcon = document.createElement('span');
+	playIcon.className = 'video-play-icon';
+	playIcon.textContent = '▶';
+	videoPreview.append(playIcon);
 
 	const details = createCardDetails(photo);
 	const videoLink = document.createElement('a');
@@ -185,17 +313,26 @@ function openImageModal(photo, opener) {
 	modalOpener = opener;
 	modalMedia.replaceChildren();
 
-	const modalImage = document.createElement('img');
-	modalImage.src = photo.hdurl || photo.url;
-	modalImage.alt = photo.title;
-	modalImage.addEventListener('error', () => {
-		modalImage.remove();
+	const imageUrl = getApodImageUrl(photo);
+	if (imageUrl) {
+		const modalImage = document.createElement('img');
+		modalImage.src = imageUrl;
+		modalImage.alt = photo.title;
+		modalImage.addEventListener('error', () => {
+			modalImage.remove();
+			showModalImageUnavailable();
+		}, { once: true });
+		modalMedia.append(modalImage);
+	} else {
+		showModalImageUnavailable();
+	}
+
+	function showModalImageUnavailable() {
 		const unavailableMessage = document.createElement('p');
 		unavailableMessage.className = 'modal-image-error';
 		unavailableMessage.textContent = 'This image is unavailable right now.';
 		modalMedia.append(unavailableMessage);
-	}, { once: true });
-	modalMedia.append(modalImage);
+	}
 
 	modalDate.textContent = photo.date;
 	modalTitle.textContent = photo.title;
